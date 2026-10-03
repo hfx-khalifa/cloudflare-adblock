@@ -1,3 +1,50 @@
+name: Update Cloudflare AdBlock
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download HaGeZi Pro
+        run: |
+          curl -fsSL \
+            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.txt" \
+            -o hagezi.txt
+
+      - name: Convert to domains
+        run: |
+          python3 - <<'PY'
+          import re
+
+          domains = set()
+
+          with open("hagezi.txt", encoding="utf-8", errors="ignore") as f:
+              for line in f:
+                  line = line.strip()
+
+                  if not line or line.startswith(("!", "#", "[")):
+                      continue
+
+                  m = re.match(r"^\|\|([A-Za-z0-9.-]+)\^", line)
+
+                  if m:
+                      domain = m.group(1).lower()
+
+                      if "." in domain and not domain.startswith("."):
+                          domains.add(domain)
+
+          with open("domains.txt", "w", encoding="utf-8") as f:
+              for domain in sorted(domains):
+                  f.write(domain + "\n")
+
+          print("Domains:", len(domains))
+          PY
+
       - name: Update Cloudflare Gateway List
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
