@@ -64,7 +64,7 @@ jobs:
 
       - name: Create Cloudflare payload
         env:
-          CF_LIST_NAME: Hafiz-AdBlock
+          CF_LIST_NAME: HaGeZi Pro
         run: |
           python3 - <<'PY'
           import json
