@@ -1,104 +1,31 @@
-name: Update Cloudflare AdBlock
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 */6 * * *"
-
-permissions:
-  contents: read
-
-jobs:
-  update:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download HaGeZi Pro
-        run: |
-          curl -fsSL \
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.txt" \
-            -o pro.txt
-
-      - name: Convert AdBlock to domains
-        run: |
-          python3 - <<'PY'
-          import re
-
-          domains = set()
-
-          with open("pro.txt", "r", encoding="utf-8", errors="ignore") as f:
-              for line in f:
-                  line = line.strip()
-
-                  # Skip comments / empty lines
-                  if not line or line.startswith(("!", "#", "[")):
-                      continue
-
-                  # ||example.com^
-                  m = re.match(r"^\|\|([A-Za-z0-9.-]+)\^", line)
-                  if not m:
-                      continue
-
-                  domain = m.group(1).lower().rstrip(".")
-
-                  # Basic validation
-                  if "." not in domain:
-                      continue
-
-                  if len(domain) > 253:
-                      continue
-
-                  if ".." in domain:
-                      continue
-
-                  domains.add(domain)
-
-          with open("domains.txt", "w", encoding="utf-8") as f:
-              for domain in sorted(domains):
-                  f.write(domain + "\n")
-
-          print("Domains:", len(domains))
-          PY
-
-      - name: Build Cloudflare payload
-        env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_LIST_ID: ${{ secrets.CF_LIST_ID }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-
-          with open("domains.txt", encoding="utf-8") as f:
-              domains = [x.strip() for x in f if x.strip()]
-
-          payload = {
-              "name": "Hafiz-AdBlock",
-              "type": "DOMAIN",
-              "items": [
-                  {"value": domain}
-                  for domain in domains
-              ]
-          }
-
-          with open("payload.json", "w", encoding="utf-8") as f:
-              json.dump(payload, f)
-
-          print("Cloudflare items:", len(domains))
-          PY
-
       - name: Update Cloudflare Gateway List
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_LIST_ID: ${{ secrets.CF_LIST_ID }}
         run: |
+          python3 - <<'PY'
+          import json
+
+          with open("domains.txt", encoding="utf-8") as f:
+              domains = [x.strip() for x in f if x.strip()]
+
+          with open("items.json", "w", encoding="utf-8") as f:
+              json.dump(
+                  [{"value": d} for d in domains],
+                  f,
+                  separators=(",", ":")
+              )
+
+          print("Items:", len(domains))
+          PY
+
           curl -fsS \
             -X PUT \
-            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}/items" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data-binary @payload.json \
+            --data-binary @items.json \
             -o response.json
 
           cat response.json
