@@ -1,88 +1,243 @@
-name: Update Cloudflare AdBlock
+name: Update Cloudflare HaGeZi
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 */6 * * *"
 
+permissions:
+  contents: read
+
 jobs:
   update:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download HaGeZi Pro
+      - name: Download HaGeZi Pro Mini
         run: |
+          set -e
+
           curl -fsSL \
-            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.txt" \
+            "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro.mini-onlydomains.txt" \
             -o hagezi.txt
 
-          echo "Downloaded HaGeZi Pro"
+          echo "HaGeZi downloaded."
+          echo "Lines:"
           wc -l hagezi.txt
 
-      - name: Convert AdBlock to domains
+      - name: Clean and validate domains
         run: |
           python3 - <<'PY'
           import re
 
           domains = set()
 
-          with open("hagezi.txt", "r", encoding="utf-8", errors="ignore") as f:
+          with open(
+              "hagezi.txt",
+              "r",
+              encoding="utf-8",
+              errors="ignore"
+          ) as f:
+
               for line in f:
-                  line = line.strip()
+                  domain = line.strip().lower()
 
-                  if not line:
+                  if not domain:
                       continue
 
-                  if line.startswith(("!", "#", "[")):
+                  if domain.startswith((
+                      "#",
+                      "!",
+                      "[",
+                      ";"
+                  )):
                       continue
 
-                  # ||example.com^
-                  match = re.match(
-                      r"^\|\|([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)\^",
-                      line
-                  )
+                  # Remove leading/trailing dot
+                  domain = domain.strip(".")
 
-                  if not match:
-                      continue
-
-                  domain = match.group(1).lower()
-
-                  if "." not in domain:
+                  # Basic domain validation
+                  if len(domain) > 253:
                       continue
 
                   if ".." in domain:
                       continue
 
+                  if not re.fullmatch(
+                      r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?",
+                      domain
+                  ):
+                      continue
+
+                  if "." not in domain:
+                      continue
+
                   domains.add(domain)
 
-          with open("domains.txt", "w", encoding="utf-8") as f:
+          if not domains:
+              raise SystemExit(
+                  "ERROR: No valid domains were extracted."
+              )
+
+          with open(
+              "domains.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
               for domain in sorted(domains):
                   f.write(domain + "\n")
 
-          print("Domains extracted:", len(domains))
+          print(
+              f"Valid unique domains: {len(domains)}"
+          )
           PY
 
-      - name: Create Cloudflare payload
+      - name: Find Cloudflare HaGeZi Pro list
         env:
-          CF_LIST_NAME: HaGeZi Pro
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          set -e
+
+          curl -fsSL \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists?search=HaGeZi%20Pro" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -o lists.json
+
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open(
+              "lists.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+              data = json.load(f)
+
+          if not data.get("success"):
+              print(
+                  json.dumps(
+                      data,
+                      indent=2
+                  )
+              )
+              sys.exit(1)
+
+          results = data.get("result", [])
+
+          matches = [
+              x for x in results
+              if x.get("name", "").strip().lower()
+              == "hagezi pro"
+          ]
+
+          if not matches:
+              print(
+                  "ERROR: Cloudflare Gateway List "
+                  "'HaGeZi Pro' was not found."
+              )
+
+              print("")
+              print("Available Gateway Lists:")
+
+              for item in results:
+                  print(
+                      "-",
+                      item.get("name"),
+                      "|",
+                      item.get("type"),
+                      "|",
+                      item.get("id")
+                  )
+
+              sys.exit(1)
+
+          if len(matches) > 1:
+              print(
+                  "ERROR: More than one "
+                  "'HaGeZi Pro' list was found."
+              )
+              sys.exit(1)
+
+          item = matches[0]
+
+          list_id = item.get("id")
+          list_name = item.get("name")
+          list_type = item.get("type")
+          current_count = item.get("count")
+
+          if not list_id:
+              print(
+                  "ERROR: List has no ID."
+              )
+              sys.exit(1)
+
+          if list_type != "DOMAIN":
+              print(
+                  f"ERROR: '{list_name}' is type "
+                  f"'{list_type}', expected DOMAIN."
+              )
+              sys.exit(1)
+
+          with open(
+              "list_id.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(list_id)
+
+          print("")
+          print("==============================")
+          print("Cloudflare List Found")
+          print("Name:", list_name)
+          print("Type:", list_type)
+          print("ID:", list_id)
+          print("Current items:", current_count)
+          print("==============================")
+          PY
+
+      - name: Build Cloudflare payload
         run: |
           python3 - <<'PY'
           import json
-          import os
 
-          with open("domains.txt", "r", encoding="utf-8") as f:
-              domains = [x.strip() for x in f if x.strip()]
+          with open(
+              "domains.txt",
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              domains = [
+                  line.strip()
+                  for line in f
+                  if line.strip()
+              ]
+
+          items = [
+              {
+                  "value": domain
+              }
+              for domain in domains
+          ]
 
           payload = {
-              "name": os.environ["CF_LIST_NAME"],
-              "description": "HaGeZi Pro automatic DNS blocklist",
-              "items": [
-                  {"value": domain}
-                  for domain in domains
-              ]
+              "name": "HaGeZi Pro",
+              "description": (
+                  "HaGeZi Pro Mini "
+                  "automatic DNS blocklist"
+              ),
+              "items": items
           }
 
-          with open("payload.json", "w", encoding="utf-8") as f:
+          with open(
+              "payload.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
               json.dump(
                   payload,
                   f,
@@ -90,25 +245,48 @@ jobs:
                   separators=(",", ":")
               )
 
-          print("Cloudflare items:", len(domains))
-          print("Payload created.")
+          import os
+
+          size_mb = (
+              os.path.getsize("payload.json")
+              / 1024
+              / 1024
+          )
+
+          print("")
+          print("==============================")
+          print("Payload ready")
+          print("Domains:", len(domains))
+          print(
+              f"Payload size: {size_mb:.2f} MB"
+          )
+          print("==============================")
           PY
 
       - name: Update Cloudflare Gateway List
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_LIST_ID: ${{ secrets.CF_LIST_ID }}
         run: |
-          HTTP_CODE=$(curl -sS \
-            -o response.json \
-            -w "%{http_code}" \
-            -X PUT \
-            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}" \
-            -H "Authorization: Bearer ${CF_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data-binary @payload.json)
+          set -e
 
+          CF_LIST_ID="$(cat list_id.txt)"
+
+          echo "Updating Cloudflare List..."
+          echo "List ID: ${CF_LIST_ID}"
+
+          HTTP_CODE="$(
+            curl -sS \
+              -o response.json \
+              -w "%{http_code}" \
+              -X PUT \
+              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}" \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary @payload.json
+          )"
+
+          echo ""
           echo "HTTP status: ${HTTP_CODE}"
           echo ""
 
@@ -118,54 +296,86 @@ jobs:
           import json
           import sys
 
-          with open("response.json", "r", encoding="utf-8") as f:
+          with open(
+              "response.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
               data = json.load(f)
 
           if not data.get("success"):
               print("")
-              print("Cloudflare API returned an error.")
-              print(json.dumps(data, indent=2))
+              print(
+                  "ERROR: Cloudflare API update failed."
+              )
+
+              print(
+                  json.dumps(
+                      data,
+                      indent=2
+                  )
+              )
+
               sys.exit(1)
 
           result = data.get("result", {})
 
           print("")
-          print("================================")
-          print("Cloudflare update successful")
-          print("List:", result.get("name"))
+          print("==============================")
+          print("UPDATE SUCCESS")
+          print("Name:", result.get("name"))
           print("Type:", result.get("type"))
           print("Items:", result.get("count"))
-          print("================================")
+          print("ID:", result.get("id"))
+          print("==============================")
           PY
 
-      - name: Verify update
+      - name: Verify Cloudflare List
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_LIST_ID: ${{ secrets.CF_LIST_ID }}
         run: |
-          curl -fsS \
+          set -e
+
+          CF_LIST_ID="$(cat list_id.txt)"
+
+          curl -fsSL \
             "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
             -o verify.json
 
           python3 - <<'PY'
           import json
+          import sys
 
-          with open("verify.json", "r", encoding="utf-8") as f:
+          with open(
+              "verify.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
               data = json.load(f)
 
           if not data.get("success"):
-              print("Verification failed.")
-              print(json.dumps(data, indent=2))
-              raise SystemExit(1)
+              print(
+                  json.dumps(
+                      data,
+                      indent=2
+                  )
+              )
+              sys.exit(1)
 
-          result = data["result"]
+          result = data.get("result", {})
 
-          print("================================")
-          print("Verification successful")
-          print("List:", result.get("name"))
+          print("")
+          print("==============================")
+          print("VERIFICATION SUCCESS")
+          print("Name:", result.get("name"))
           print("Type:", result.get("type"))
-          print("Cloudflare count:", result.get("count"))
-          print("================================")
+          print(
+              "Cloudflare items:",
+              result.get("count")
+          )
+          print("ID:", result.get("id"))
+          print("==============================")
           PY
