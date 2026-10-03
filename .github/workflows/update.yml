@@ -16,33 +16,82 @@ jobs:
             "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.txt" \
             -o hagezi.txt
 
-      - name: Convert to domains
+          echo "Downloaded HaGeZi Pro"
+          wc -l hagezi.txt
+
+      - name: Convert AdBlock to domains
         run: |
           python3 - <<'PY'
           import re
 
           domains = set()
 
-          with open("hagezi.txt", encoding="utf-8", errors="ignore") as f:
+          with open("hagezi.txt", "r", encoding="utf-8", errors="ignore") as f:
               for line in f:
                   line = line.strip()
 
-                  if not line or line.startswith(("!", "#", "[")):
+                  if not line:
                       continue
 
-                  m = re.match(r"^\|\|([A-Za-z0-9.-]+)\^", line)
+                  if line.startswith(("!", "#", "[")):
+                      continue
 
-                  if m:
-                      domain = m.group(1).lower()
+                  # ||example.com^
+                  match = re.match(
+                      r"^\|\|([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)\^",
+                      line
+                  )
 
-                      if "." in domain and not domain.startswith("."):
-                          domains.add(domain)
+                  if not match:
+                      continue
+
+                  domain = match.group(1).lower()
+
+                  if "." not in domain:
+                      continue
+
+                  if ".." in domain:
+                      continue
+
+                  domains.add(domain)
 
           with open("domains.txt", "w", encoding="utf-8") as f:
               for domain in sorted(domains):
                   f.write(domain + "\n")
 
-          print("Domains:", len(domains))
+          print("Domains extracted:", len(domains))
+          PY
+
+      - name: Create Cloudflare payload
+        env:
+          CF_LIST_NAME: Hafiz-AdBlock
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("domains.txt", "r", encoding="utf-8") as f:
+              domains = [x.strip() for x in f if x.strip()]
+
+          payload = {
+              "name": os.environ["CF_LIST_NAME"],
+              "description": "HaGeZi Pro automatic DNS blocklist",
+              "items": [
+                  {"value": domain}
+                  for domain in domains
+              ]
+          }
+
+          with open("payload.json", "w", encoding="utf-8") as f:
+              json.dump(
+                  payload,
+                  f,
+                  ensure_ascii=False,
+                  separators=(",", ":")
+              )
+
+          print("Cloudflare items:", len(domains))
+          print("Payload created.")
           PY
 
       - name: Update Cloudflare Gateway List
@@ -51,42 +100,72 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_LIST_ID: ${{ secrets.CF_LIST_ID }}
         run: |
-          python3 - <<'PY'
-          import json
-
-          with open("domains.txt", encoding="utf-8") as f:
-              domains = [x.strip() for x in f if x.strip()]
-
-          with open("items.json", "w", encoding="utf-8") as f:
-              json.dump(
-                  [{"value": d} for d in domains],
-                  f,
-                  separators=(",", ":")
-              )
-
-          print("Items:", len(domains))
-          PY
-
-          curl -fsS \
+          HTTP_CODE=$(curl -sS \
+            -o response.json \
+            -w "%{http_code}" \
             -X PUT \
-            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}/items" \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data-binary @items.json \
-            -o response.json
+            --data-binary @payload.json)
+
+          echo "HTTP status: ${HTTP_CODE}"
+          echo ""
 
           cat response.json
 
           python3 - <<'PY'
           import json
+          import sys
 
-          with open("response.json", encoding="utf-8") as f:
+          with open("response.json", "r", encoding="utf-8") as f:
               data = json.load(f)
 
           if not data.get("success"):
-              print("Cloudflare API failed:")
+              print("")
+              print("Cloudflare API returned an error.")
+              print(json.dumps(data, indent=2))
+              sys.exit(1)
+
+          result = data.get("result", {})
+
+          print("")
+          print("================================")
+          print("Cloudflare update successful")
+          print("List:", result.get("name"))
+          print("Type:", result.get("type"))
+          print("Items:", result.get("count"))
+          print("================================")
+          PY
+
+      - name: Verify update
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_LIST_ID: ${{ secrets.CF_LIST_ID }}
+        run: |
+          curl -fsS \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/gateway/lists/${CF_LIST_ID}" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -o verify.json
+
+          python3 - <<'PY'
+          import json
+
+          with open("verify.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          if not data.get("success"):
+              print("Verification failed.")
               print(json.dumps(data, indent=2))
               raise SystemExit(1)
 
-          print("Cloudflare Gateway list updated successfully.")
+          result = data["result"]
+
+          print("================================")
+          print("Verification successful")
+          print("List:", result.get("name"))
+          print("Type:", result.get("type"))
+          print("Cloudflare count:", result.get("count"))
+          print("================================")
           PY
